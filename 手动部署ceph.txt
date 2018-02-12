@@ -1,0 +1,233 @@
+xuleisdjn的专栏
+好记性不如烂笔头...
+ 目录视图 摘要视图 订阅 管理博客 写新文章 发布Chat
+ 手动部署CEPH rbd
+2018-02-11 09:04 11人阅读 评论(0) 收藏 编辑 删除
+分类： kubernetes（8）   ceph（2）  
+版权声明：本文为博主原创文章，转载请注明出处哦~。 http://blog.csdn.net/xuleisdjn/article/details/79308185
+手动部署 CEPH rbd
+在一台机器上进行验证使用：同一台机器上部署一个ceph-mon和一个ceph-osd。
+
+首先查看下系统内核是否支持rbd，如果有错误提示，说明内核不支持，需要升级内核
+# modprobe rbd
+FATAL: Module rbd not found.
+尴尬不，没有rbd内核，其实我是部署完之后才发现的。升级下内核。
+#modprobe rbd
+--------------------
+All-nodes:如果是集群就在所有机器上进行设置
+--------------------
+
+1- 各节点设置 hosts
+# vim /etc/hosts
+10.200.80.18 node18
+...
+--------------------
+Monitor:在监视器节点上进行，集群的话需要修改配置文件，将所有monitor写入配置文件即可
+--------------------
+
+1- 确定 fsid
+# uuidgen
+1c2f9d3b-fc18-4753-8651-39ca6223fe64
+
+2- 配置文件
+# vim /etc/ceph/ceph.conf
+[global]
+fsid=1c2f9d3b-fc18-4753-8651-39ca6223fe64
+mon initial members = node18
+mon host = 10.200.80.18
+public network = 10.200.80.0/24
+auth cluster required = cephx
+auth service required = cephx
+auth client required = cephx
+osd journal size = 1024
+filestore xattr use omap = true
+osd pool default size = 1
+osd pool default min size = 1
+osd pool default pg num = 333
+osd pool default pgp num = 333
+osd crush chooseleaf type = 1
+rbd_default_features = 1
+[mon]
+        mon host = node18
+        mon addr = 10.200.80.186789
+[mon.a]
+        host = node18
+        mon addr = 10.200.80.18:6789
+[osd.0]
+        host = node18
+
+3- 创建 keyring
+# ceph-authtool --create-keyring /tmp/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
+
+
+4- 生成管理员 keyring
+# ceph-authtool --create-keyring /etc/ceph/ceph.client.admin.keyring --gen-key -n client.admin --set-uid=0 --cap mon 'allow *' --cap osd 'allow *' --cap mds 'allow'
+
+
+5- 将 client.admin key 导入 ceph.mon.keyring
+# ceph-authtool /tmp/ceph.mon.keyring --import-keyring /etc/ceph/ceph.client.admin.keyring
+
+
+6- 生成 monitor map
+# monmaptool --create --add node18 10.200.80.18 --fsid 0a933b1b-6a20-4627-91a1-36adb6a0d709 /tmp/monmap
+
+
+7- 创建 monitor 数据目录 ceph-{hostname}
+# mkdir /var/lib/ceph/mon/ceph-node18
+
+8- 导入 monitor map 和 keyring 信息
+# ceph-mon --mkfs -i node18 --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring
+
+9- 创建两个空文件
+# touch /var/lib/ceph/mon/ceph-node18/done
+# touch /var/lib/ceph/mon/ceph-node18/sysvinit
+
+10- 启动 monitor
+# service ceph start mon.node18
+=== mon.node18 ===
+Starting Ceph mon.node18 on node18...
+Running as unit run-5055.service.
+Starting ceph-create-keys on node18...
+
+上面方法不到能启动就使用下面命令
+#ceph-mon -i node18
+
+11- 检查一下
+# ceph -s
+
+cluster 0a933b1b-6a20-4627-91a1-36adb6a0d709
+health HEALTH_ERR
+64 pgs stuck inactive
+64 pgs stuck unclean
+no osds
+monmap e1: 1 mons at {node18=10.200.80.18:6789/0}
+election epoch 2, quorum 0 node18
+osdmap e1: 0 osds: 0 up, 0 in
+pgmap v2: 64 pgs, 1 pools, 0 bytes data, 0 objects
+0 kB used, 0 kB / 0 kB avail
+64 creating
+
+还没有osd，health为ERR。
+#ceph --cluster=ceph --admin-daemon /var/run/ceph/ceph-mon.node18.asok mon_status
+{ "name": "node18",
+  "rank": 0,
+  "state": "leader",
+  "election_epoch": 1,
+  "quorum": [
+        0],
+  "outside_quorum": [],
+  "extra_probe_peers": [],
+  "sync_provider": [],
+  "monmap": { "epoch": 1,
+      "fsid": "1c2f9d3b-fc18-4753-8651-39ca6223fe64",
+      "modified": "2018-02-06 10:49:13.819026",
+      "created": "2018-02-06 10:49:13.819026",
+      "mons": [
+            { "rank": 0,
+              "name": "node18",
+              "addr": "10.200.80.18:6789\/0"}]}}
+
+
+12- 将 keyring 和 ceph.conf 拷贝到各个 osd 节点 比如10.200.80.19
+
+# scp /etc/ceph/ceph.conf 10.200.80.19:/etc/ceph/
+# scp /etc/ceph/ceph.client.admin.keyring 10.200.80.19:/etc/ceph/
+
+
+--------------------
+Osds：每个机器可以多个osd，每块硬盘或分区可以单独做一个osd。osd个数按实际启动的osd进程计算。
+--------------------
+
+1- Create OSD
+# uuidgen
+d6354bb5-b390-44b5-948f-fbb7f939e53a
+
+# ceph osd create d6354bb5-b390-44b5-948f-fbb7f939e53a
+0
+
+2- 创建数据存储目录
+
+--目录方式
+# mkdir -p /data/ceph/osd/ceph-0
+# ln -s /data/ceph/osd/ceph-0 /var/lib/ceph/osd/ceph-0
+
+
+--磁盘方式
+  存储挂的磁阵，这里要把挂的硬盘分区、格式化
+# fdisk /dev/vdb
+# mkfs.ext4 /dev/vdb1
+
+  挂载
+# mount -o defaults,_netdev /dev/vdb1 /var/lib/ceph/osd/ceph-0
+
+  写入分区表
+# vim /etc/fstab
+/dev/vdb1 /var/lib/ceph/osd/ceph-0 ext4 defaults,_netdev 0 0
+
+
+3- 初始化 OSD 数据目录
+
+
+# ceph-osd -i 0 --mkfs --mkjournal --mkkey \
+> --osd-uuid d6354bb5-b390-44b5-948f-fbb7f939e53a \
+> --cluster ceph \
+> --osd-data=/data/ceph/osd/ceph-0 \
+> --osd-journal=/data/ceph/osd/ceph-0/journal
+
+4- 注册 OSD authentication key
+
+# ceph auth add osd.0 osd 'allow *' mon 'allow profile osd' -i /data/ceph/osd/ceph-0/keyring
+added key for osd.0
+
+5- 将 ceph 节点加入 CRUSH map
+
+# ceph osd crush add-bucket node6 host
+added bucket node6 type host to crush map
+
+# ceph osd crush move node6 root=default
+moved item id -2 name 'node6' to location {root=default} in crush map
+
+
+6- 将 OSD 加入 CRUSH map 此处设置权重为1.0
+
+# ceph osd crush add osd.0 1.0 host=node6
+add item id 0 name 'osd.0' weight 1 at location {host=node6} to crush map
+
+
+7- 创建初始化文件
+
+
+# touch /var/lib/ceph/osd/ceph-0/sysvinit
+
+
+
+
+8- 启动服务
+# service ceph start osd.0
+=== osd.0 ===
+create-or-move updated item name 'osd.0' weight 0.96 at location {host=node6,root=default} to crush map
+Starting Ceph osd.0 on node6...
+Running as unit run-27621.service.
+
+
+如果上述命令不成功,使用下面命令
+#ceph-osd -i 0 
+starting osd.0 at :/0 osd_data /var/lib/ceph/osd/ceph-0 /var/lib/ceph/osd/ceph-0/journal
+
+
+9- 检查
+# ceph -s
+    cluster 1c2f9d3b-fc18-4753-8651-39ca6223fe64
+     health HEALTH_WARN mon.node18 low disk space
+     monmap e1: 1 mons at {node18=10.200.80.18:6789/0}, election epoch 1, quorum 0 node18
+     osdmap e23: 1 osds: 1 up, 1 in
+      pgmap v790: 525 pgs, 4 pools, 12052 kB data, 15 objects
+            63788 MB used, 100 GB / 171 GB avail
+                 525 active+clean
+
+
+# ceph osd tree
+# id	weight	type name	up/down	reweight
+-1	1	root default
+-2	1		host node18
+0	1			osd.0	up	1	

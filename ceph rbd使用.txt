@@ -1,0 +1,130 @@
+RBD功能验证 RBD客户端配置使用
+--------------------
+RBD功能验证
+--------------------
+Warning:内核如果不支持rbd，是无法使用CEPH RBD的，没法map。
+先查看下系统内核是否支持rbd，如果有错误提示，说明内核不支持，需要升级内核
+# modprobe rbd
+FATAL: Module rbd not found.
+
+创建一个存储池
+# ceph osd pool create kube
+pool 'kube' created
+
+查看存储池
+# ceph osd lspools
+0 data,1 metadata,2 rbd,3 kube,
+
+删除一个存储池
+#ceph osd pool delete kube kube --yes-i-really-really-mean-it
+pool 'kube' removed
+
+# ceph osd lspools
+0 data,1 metadata,2 rbd,
+
+查看存储池统计信息
+# rados df
+pool name       category                 KB      objects       clones     degraded      unfound           rd        rd KB           wr 
+       wr KBdata            -                          0            0            0            0           0            0            0            0 
+           0kube            -                          0            0            0            0           0            0            0            0 
+           0metadata        -                          0            0            0            0           0            0            0            0 
+           0rbd             -                          1            3            0            0           0          526         7531          101 
+       12476  total used        65310940            3
+  total avail      105471156
+  total space      179945872
+
+创建块设备映像、默认pool为rbd
+[root@node182 ceph]# rbd create --size 1024 foo
+[root@node182 ceph]# rbd ls
+foo
+# rbd create --size 1024  kube/test
+[root@node182 ceph]# rbd ls kube
+test
+
+检索映像信息、默认pool为rbd
+# rbd info foo
+rbd image 'foo':
+	size 1024 MB in 256 objects
+	order 22 (4096 kB objects)
+	block_name_prefix: rb.0.11a8.74b0dc51
+	format: 1
+# rbd info test
+2018-02-09 14:45:48.380081 fff1615d60 -1 librbd::ImageCtx: error finding header: (2) No such file or directory
+rbd: error opening image test: (2) No such file or directory
+# rbd info kube/test
+rbd image 'test':
+	size 1024 MB in 256 objects
+	order 22 (4096 kB objects)
+	block_name_prefix: rb.0.11b8.74b0dc51
+	format: 1
+
+调整块设备映像大小
+rbd resize --size 2048 foo (to increase)
+rbd resize --size 2048 foo --allow-shrink (to decrease)
+
+删除块设备映像
+#rbd rm foo
+
+--------------------
+客户端配置文件
+--------------------
+1、在客户端修改/etc/hosts，将服务器名称和ip填入
+2、将ceph服务器的/etc/ceph/里面的ceph.conf和ceph.client.admin.keyring两个文件copy到客户端机器的/etc/ceph目录
+（ceph集群的默认配置文件目录）
+
+
+--------------------
+客户端配置块设备、使用与卸载
+--------------------
+1、创建块设备映像、默认pool为rbd
+# rbd create --size 1024 foo
+# rbd ls
+fool
+2、将映像映射到块设备
+# rbd map foo
+# rbd showmapped
+id pool image snap device    
+1  rbd  foo   -    /dev/rbd1 
+3、格式化块块设备
+#fdisk -l /dev/rbd1
+
+
+Disk /dev/rbd1：1 GiB，1073741824 字节，2097152 个扇区
+单元：扇区 / 1 * 512 = 512 字节
+扇区大小(逻辑/物理)：512 字节 / 512 字节
+I/O 大小(最小/最佳)：4194304 字节 / 4194304 字节
+
+
+# mkfs.ext4 -m0 /dev/rbd1 
+mke2fs 1.42.11 (09-Jul-2014)
+Creating filesystem with 262144 4k blocks and 65536 inodes
+Filesystem UUID: 9d97dc27-d1da-4b36-8237-f7d5a919237b
+Superblock backups stored on blocks: 
+	32768, 98304, 163840, 229376
+
+
+Allocating group tables: 完成                            
+正在写入inode表: 完成                            
+Creating journal (8192 blocks): 完成
+Writing superblocks and filesystem accounting information: 完成
+4、挂载该设备
+# mkdir /mnt/rbdfoo
+# mount -t ext4 /dev/rbd1 /mnt/rbdfoo
+#mount
+/dev/rbd1 on /mnt/rbdfoo type ext4 (rw,relatime,stripe=1024,data=ordered)
+
+
+5、取消挂载
+        客户端重启时注意
+        如果客户端需要重启，需要将挂载目录先卸载，重启之后再重新执行rbd map,以及mount 的操作，否则系统在重启的过程中会被卡在"Umounting file system"这个操作上。
+取消挂载命令如下：
+        umount  /mnt/rbdfoo
+6、取消映射
+#rbd unmap /dev/rbd1
+# rbd showmapped
+id pool image snap device    
+2  kube test  -    /dev/rbd2 
+
+7、删除块设备
+# rbd rm foo
+Removing image: 100% complete...done.

@@ -1,0 +1,112 @@
+使用Ceph RBD作为kuberntes的PersistentVolume
+
+1-关键字解释
+在k8s的examples/volumes/rbd目录下
+例子提供了两个pod描述文件：rbd.json和rbd-with-secret.json。
+由于我们的ceph配置文件ceph.conf中使用默认的安全验证协议cephx – The Ceph authentication protocol了：
+auth_cluster_required = cephx
+auth_service_required = cephx
+auth_client_required = cephx
+因此我们将采用rbd-with-secret这个pod描述文件来创建例子中的Pod，
+        "volumes": [
+            {
+                "name": "rbdpd",
+                "rbd": {
+                    "monitors": [
+        						"10.110.154.81:6789",
+						        "10.110.154.82:6789",
+        						"10.110.154.83:6789"
+    				 ],
+                    "pool": "kube",
+                    "image": "foo",
+                    "user": "admin",
+                    "secretRef": {
+						  "name": "ceph-secret"
+					 },
+                    "fsType": "ext4",
+                    "readOnly": true
+                }
+            }
+
+volumes部分是和ceph rbd紧密相关的一些信息，各个字段的大致含义如下：
+name：volume名字，这个没什么可说的，顾名思义即可。
+rbd.monitors：前面提到过ceph集群的monitor组件，这里填写monitor组件的通信信息，集群里有几个monitor就填几个；
+rbd.pool：Ceph中的pool记号，它用来给ceph中存储的对象进行逻辑分区用的。默认的pool是”rbd”；
+rbd.image：Ceph磁盘块设备映像文件；
+rbd.user：ceph client访问ceph storage cluster所使用的用户名。ceph有自己的一套user管理系统，user的写法通常是TYPE.ID，比如client.admin（是不是想到对应的文件：ceph.client.admin.keyring）。client是一种type，而admin则是user。一般来说，Type基本都是client。
+secret.Ref：引用的k8s secret对象名称。
+
+上面的字段中，有两个字段值我们无法提供：rbd.image和secret.Ref，现在我们就来“填空”。我们在root用户下建立k8s-cephrbd工作目录，我们首先需要使用ceph提供的rbd工具创建Pod要用到image：
+
+
+
+2-创建rbd映像
+ 创建一个存储池
+[root@node7 ceph]# ceph osd pool create kube
+pool 'kube' created
+ 创建映像
+[root@node7 ceph]# rbd create kube/testimage -s 1024
+[root@node7 ceph]# rbd list kube
+testimage
+
+
+创建一个pool然后创建一个大小为1024Mi的ceph image kube/testimage，
+rbd list命令的输出告诉我们testimage创建成功。
+3-映射到内核
+[root@node7 ~]# modprobe rbd
+FATAL: Module rbd not found.
+哦，尴尬了，内核没有编译rbd选项
+# CONFIG_BLK_DEV_RBD is not set
+需要改成
+CONFIG_BLK_DEV_RBD=m
+WARNING：使用ceph rbd的节点需要安装ceph的客户端。并且该节点内核需要支持rbd才能进行映射，否则会出现映射失败的错误
+
+4-生成secret
+接下来我们来创建ceph-secret这个k8s secret对象，这个secret对象用于k8s volume插件访问ceph集群：
+获取client.admin的keyring值，并用base64编码：
+[root@node80 ceph]# ceph auth get-key client.admin
+AQBmHXlaGLIXBRAABYorFD2VooPJMXTsi0Xmig==
+
+[root@node80 ceph]# echo AQBmHXlaGLIXBRAABYorFD2VooPJMXTsi0Xmig==|base64
+QVFCbUhYbGFHTElYQlJBQUJZb3JGRDJWb29QSk1YVHNpMFhtaWc9PQo=
+
+在k8s-cephrbd下建立ceph-secret.yaml文件，data下的key字段值即为上面得到的编码值：
+//ceph-secret.yaml
+[root@node80 ceph]# cat ceph-secret.yaml 
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-secret
+type: "kubernetes.io/rbd"
+data:
+  key: QVFCbUhYbGFHTElYQlJBQUJZb3JGRDJWb29QSk1YVHNpMFhtaWc9PQo=
+
+创建ceph-secret：
+[root@node80 ceph]# kubectl create -f ceph-secret.yaml
+secret "ceph-secret" created
+[root@node80 ceph]# kubectl get secret
+NAME                  TYPE                                  DATA      AGE
+ceph-secret           kubernetes.io/rbd                     1         1d
+
+5-编写pv的yaml文件
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ceph-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  rbd:
+    monitors:
+      - 10.110.154.80:6789
+    pool: kube
+    image: testimage
+    user: admin
+    secretRef:
+      name: ceph-secret
+    fsType: ext4
+    readOnly: false
+  persistentVolumeReclaimPolicy: Recycle
+6-后面使用就不写了。就是生成PV，然后生成PVC，然后使用了。
